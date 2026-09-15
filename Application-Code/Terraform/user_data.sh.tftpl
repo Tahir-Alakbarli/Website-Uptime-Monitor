@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y ca-certificates curl
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+. /etc/os-release
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+usermod -aG docker ubuntu
+
+if systemctl list-unit-files | grep -q "^amazon-ssm-agent"; then
+  systemctl enable --now amazon-ssm-agent
+else
+  snap install amazon-ssm-agent --classic
+  systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service
+fi
+
+mkdir -p "${project_directory}"
+
+printf "%s" "${compose_file_base64}" | base64 --decode > "${project_directory}/compose.aws.yaml"
+
+cat > "${project_directory}/.env" <<'EOF'
+CI_REGISTRY_IMAGE=${gitlab_registry_image}
+IMAGE_TAG=latest
+MYSQL_DATABASE=${mysql_database}
+MYSQL_USER=${mysql_user}
+MYSQL_PASSWORD=${mysql_password}
+EOF
+
+chmod 600 "${project_directory}/.env"
+touch "${project_directory}/.ready"
