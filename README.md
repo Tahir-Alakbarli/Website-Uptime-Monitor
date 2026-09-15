@@ -497,7 +497,7 @@ Official documentation and image references relevant to this project:
 
 ## AI Support
 
-I used AI to find bugs inside python code that I couldn't find solution to, also I used to investigate integration problems.
+I used AI to find bugs inside python code that I couldn't find solution to, also I used to investigate integration problems. It was also helped with choosing Flask image for the python code.
 
 For the deployment failures, the useful part was connecting evidence from several places: GitLab output, container logs, port mappings, local HTTP requests, and browser errors.
 
