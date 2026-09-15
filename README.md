@@ -164,7 +164,7 @@ The test job uses a Python image and starts a MySQL service.
 
 Database credentials come from GitLab CI/CD variables. Before running pytest, the job attempts a database connection and retries while MySQL starts.
 
-This readiness step prevents the test suite from failing simply because the database service has not finished starting.
+This readiness step prevents the test from failing simply because the database service has not finished starting.
 
 ### Image Builds and Registry
 
@@ -177,9 +177,11 @@ $CI_REGISTRY_IMAGE/monitoring_app
 $CI_REGISTRY_IMAGE/test_website
 ```
 
-Images receive a short commit-SHA tag. This connects the deployed images to a particular source revision rather than relying only on a changing `latest` tag.
+GitLab stores the two Docker images in its Container Registry: one for the monitoring app and one for the test website.
 
-Default-branch builds also publish `latest`.
+Each image gets a tag based on the Git commit it was built from, such as `41687932`. This lets me identify which version of the code is running on AWS.
+
+Successful builds from `main` also update a tag called `latest`. The commit tag identifies a specific build, while `latest` points to the newest published build from `main`.
 
 <details>
 <summary>Image build and registry evidence</summary>
@@ -203,7 +205,7 @@ The process is:
 3. AWS STS returns temporary credentials.
 4. The job uses those credentials for its allowed deployment operations.
 
-The token audience is `sts.amazonaws.com`. The role trust policy restricts access to the intended GitLab project and branch.
+The GitLab token is intended for AWS STS, which provides temporary AWS credentials. AWS checks this before allowing the deployment job to sign in.
 
 This avoids storing long-lived AWS access keys in the GitLab deployment configuration. The local AWS profile used for Terraform is separate from this pipeline identity.
 
@@ -263,7 +265,7 @@ The configuration manages:
 - A generated database password.
 - Instance setup configuration.
 
-The EC2 host used a `t3.small` instance with encrypted root storage. IMDSv2 was required.
+The app ran on a `t3.small` EC2 instance with an encrypted main disk. I also required IMDSv2, which makes software obtain a temporary session token before accessing instance information or IAM role credentials. This adds protection against some unwanted requests.
 
 Dashboard access on TCP port 8000 was restricted to a configured client IPv4 address using a `/32` CIDR.
 
@@ -292,7 +294,7 @@ This separation also matters during cleanup: stopping local Docker containers do
 <details>
 <summary>Terraform and EC2 evidence</summary>
 
-![Terraform initialisation](Screenshots/Terraform-Initialization.png)
+![Terraform initialisation](Screenshots/Terraform-Initilization.png)
 
 ![Terraform validation and managed resource addresses](Screenshots/Terraform-State.png)
 
@@ -324,7 +326,7 @@ Manual verification covered parts of the setup that a passing test suite alone w
 
 I checked container status locally and on AWS, inspected the dashboard history, added external websites, and reviewed application and deployment logs.
 
-On EC2, a request to the dashboard returned HTTP 200. Public browser access was checked separately.
+On EC2, a request to the dashboard returned HTTP 200. I checked public browser access separately.
 
 The localhost check verifies the application on the server. The browser check also tests external access and Flask's public-host validation.
 
@@ -356,7 +358,7 @@ When every test fails with the same error, shared setup is worth checking before
 
 The first push failed with HTTP 403. A later attempt was rejected by the protected default-branch policy.
 
-Authentication and access-token permissions were corrected so the initial commit could be pushed.
+I corrected authentication and access-token permissions so the initial commit could be pushed.
 
 These were separate access checks: being authenticated did not automatically mean the identity could push to the protected branch.
 
@@ -407,16 +409,6 @@ This problem involved several separate checks:
 - Flask had to accept the requested hostname.
 
 The current IP-specific trusted-host setting must be updated if another deployment receives a different public IP.
-
-### Manual Upload Changed Case-Sensitive Paths
-
-Some folders in the public GitHub copy initially used uppercase names while the working configuration expected lowercase paths.
-
-The folder names were corrected to preserve `monitor`, `templates`, `terraform`, `test-site`, and `tests`.
-
-The provider lock file also retained its required name, `.terraform.lock.hcl`.
-
-Keeping the same paths matters because Linux treats uppercase and lowercase names differently.
 
 ## Security and Private Configuration
 
@@ -505,9 +497,7 @@ Official documentation and image references relevant to this project:
 
 ## AI Support
 
-I used AI to compare code and configuration examples, review diagnostic output, and investigate integration problems.
-
-The more involved areas included database authentication and health checks, temporary AWS deployment credentials, Systems Manager deployment, HTTP readiness retries, and public-host validation.
+I used AI to find bugs inside python code that I couldn't find solution to, also I used to investigate integration problems.
 
 For the deployment failures, the useful part was connecting evidence from several places: GitLab output, container logs, port mappings, local HTTP requests, and browser errors.
 
