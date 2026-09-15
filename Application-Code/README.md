@@ -137,7 +137,7 @@ An early test run failed with:
 
 The shared SQL setup referred to a table or alias in a way MySQL could not distinguish.
 
-Because the error happened during shared setup, all 11 tests errored before their individual checks could complete. Correcting the duplicate alias allowed the suite to pass.
+Because the error happened during shared setup, all 11 tests errored before their individual checks could complete. Correcting the duplicate alias allowed it to pass.
 
 This was a useful reminder to separate application failures from failures in the code preparing the test environment.
 
@@ -243,7 +243,7 @@ It gives more context than the latest-result field. For example, several timesta
 
 ## 6. Timestamps and History Cleanup
 
-The application displays timestamps in UTC and retains recent history for 24 hours.
+The application displays timestamps in CET and retains recent history for 24 hours.
 
 Retention handling needs to distinguish current results from records older than the allowed window.
 
