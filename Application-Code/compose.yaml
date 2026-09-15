@@ -1,0 +1,50 @@
+services:
+  MySQL-Container:
+    image: mysql:8.4
+    container_name: MySQL-Container
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?Set MYSQL_DATABASE in .env}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}"
+          mysql --protocol=TCP -h 127.0.0.1
+          -u "$${MYSQL_USER}" "$${MYSQL_DATABASE}"
+          -e 'SELECT 1'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  Test-Site-Container:
+    build:
+      context: ./test-site
+    image: test-site-image:local
+    container_name: Test-Site-Container
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  Monitoring-Container:
+    build:
+      context: ./monitor
+    image: monitoring-image:local
+    container_name: Monitoring-Container
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?Set MYSQL_DATABASE in .env}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      MySQL-Container:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+    name: mysql_data

@@ -1,0 +1,269 @@
+stages:
+  - test
+  - build
+  - deploy
+
+test_monitoring_app:
+  stage: test
+  image: python:3.14-slim
+
+  tags:
+    - saas-linux-small-amd64
+
+  timeout: 10m
+
+  services:
+    - name: mysql:8.4
+      alias: MySQL-Container
+
+  variables:
+    FF_NETWORK_PER_BUILD: "true"
+    MYSQL_DATABASE: "website_monitoring"
+    MYSQL_USER: "user_monitoring"
+    MYSQL_PASSWORD: "$CI_MYSQL_PASSWORD"
+    MYSQL_ROOT_PASSWORD: "$CI_MYSQL_ROOT_PASSWORD"
+    PYTHONPATH: "$CI_PROJECT_DIR/monitor"
+    PYTHONDONTWRITEBYTECODE: "1"
+
+  before_script:
+    - ': "${CI_MYSQL_PASSWORD:?Add CI_MYSQL_PASSWORD in GitLab CI/CD variables}"'
+    - ': "${CI_MYSQL_ROOT_PASSWORD:?Add CI_MYSQL_ROOT_PASSWORD in GitLab CI/CD variables}"'
+    - python -m pip install --no-cache-dir -r monitor/requirements.txt pytest==9.1.1
+
+  script:
+    - |
+      python - <<'PY'
+      import time
+
+      import mysql.connector
+      from website_monitoring_app import database_connection
+
+      start_time = time.monotonic()
+
+      while True:
+          try:
+              connection = database_connection()
+              connection.close()
+              print("MySQL is ready.")
+              break
+          except mysql.connector.Error:
+              if time.monotonic() - start_time >= 90:
+                  raise
+              time.sleep(2)
+      PY
+    - python -m pytest -p no:cacheprovider -v tests/test_monitoring_app.py
+
+build_monitoring_image:
+  stage: build
+  image: docker:27.5.1-cli
+
+  tags:
+    - saas-linux-small-amd64
+
+  services:
+    - name: docker:27.5.1-dind
+      alias: docker
+
+  variables:
+    DOCKER_HOST: "tcp://docker:2376"
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_CERT_PATH: "/certs/client"
+    DOCKER_TLS_VERIFY: "1"
+
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+
+  script:
+    - docker build --pull --tag "$CI_REGISTRY_IMAGE/monitoring_app:$CI_COMMIT_SHORT_SHA" monitor
+    - docker push "$CI_REGISTRY_IMAGE/monitoring_app:$CI_COMMIT_SHORT_SHA"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$CI_REGISTRY_IMAGE/monitoring_app:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE/monitoring_app:latest"
+        docker push "$CI_REGISTRY_IMAGE/monitoring_app:latest"
+      fi
+
+built_test_website_image:
+  stage: build
+  image: docker:27.5.1-cli
+
+  tags:
+    - saas-linux-small-amd64
+
+  services:
+    - name: docker:27.5.1-dind
+      alias: docker
+
+  variables:
+    DOCKER_HOST: "tcp://docker:2376"
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_CERT_PATH: "/certs/client"
+    DOCKER_TLS_VERIFY: "1"
+
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+
+  script:
+    - docker build --pull --tag "$CI_REGISTRY_IMAGE/test_website:$CI_COMMIT_SHORT_SHA" test-site
+    - docker push "$CI_REGISTRY_IMAGE/test_website:$CI_COMMIT_SHORT_SHA"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$CI_REGISTRY_IMAGE/test_website:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE/test_website:latest"
+        docker push "$CI_REGISTRY_IMAGE/test_website:latest"
+      fi
+
+deploy_to_aws:
+  stage: deploy
+
+  image:
+    name: amazon/aws-cli:2.36.24
+    entrypoint: [""]
+
+  tags:
+    - saas-linux-small-amd64
+
+  timeout: 30m
+
+  needs:
+    - build_monitoring_image
+    - built_test_website_image
+
+  variables:
+    AWS_REGION: "eu-central-1"
+    AWS_DEFAULT_REGION: "eu-central-1"
+    AWS_PAGER: ""
+
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: sts.amazonaws.com
+
+  before_script:
+    - ': "${AWS_ROLE_ARN:?Add AWS_ROLE_ARN in GitLab CI/CD variables}"'
+    - |
+      AWS_STS_OUTPUT=$(aws sts assume-role-with-web-identity \
+        --role-arn "$AWS_ROLE_ARN" \
+        --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}" \
+        --web-identity-token "$GITLAB_OIDC_TOKEN" \
+        --duration-seconds 3600 \
+        --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" \
+        --output text)
+
+      set -- $AWS_STS_OUTPUT
+
+      export AWS_ACCESS_KEY_ID="$1"
+      export AWS_SECRET_ACCESS_KEY="$2"
+      export AWS_SESSION_TOKEN="$3"
+
+      echo "AWS deployment role authenticated."
+
+  script:
+    - |
+      INSTANCE_ID=$(aws ec2 describe-instances \
+        --filters \
+          "Name=tag:Name,Values=Website-Uptime-Monitoring-Server" \
+          "Name=instance-state-name,Values=running" \
+        --query "Reservations[].Instances[].InstanceId | [0]" \
+        --output text)
+
+      if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+        echo "No running monitoring server was found."
+        exit 1
+      fi
+
+      echo "Waiting for Systems Manager."
+
+      SSM_STATUS=""
+
+      for ATTEMPT in $(seq 1 60); do
+        SSM_STATUS=$(aws ssm describe-instance-information \
+          --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+          --query "InstanceInformationList[0].PingStatus" \
+          --output text 2>/dev/null || true)
+
+        if [ "$SSM_STATUS" = "Online" ]; then
+          break
+        fi
+
+        sleep 5
+      done
+
+      if [ "$SSM_STATUS" != "Online" ]; then
+        echo "The monitoring server did not become available in Systems Manager."
+        exit 1
+      fi
+
+      REGISTRY_PASSWORD_BASE64=$(printf "%s" "$CI_REGISTRY_PASSWORD" | base64 | tr -d "\n")
+
+      cat > deployment-commands.json <<EOF
+      {
+        "executionTimeout": ["1200"],
+        "commands": [
+          "set -eu",
+          "timeout 600 sh -c 'until [ -f /opt/website-uptime-monitoring/.ready ]; do sleep 5; done'",
+          "cd /opt/website-uptime-monitoring",
+          "printf '%s' '$REGISTRY_PASSWORD_BASE64' | base64 -d | docker login '$CI_REGISTRY' --username '$CI_REGISTRY_USER' --password-stdin",
+          "sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=$CI_COMMIT_SHORT_SHA/' .env",
+          "docker compose --env-file .env -f compose.aws.yaml pull",
+          "docker compose --env-file .env -f compose.aws.yaml up -d --wait --wait-timeout 180 --remove-orphans",
+          "docker logout '$CI_REGISTRY'",
+          "curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 --retry-max-time 120 --max-time 10 http://127.0.0.1:8000/ -o /dev/null",
+          "docker image prune -f",
+          "docker compose --env-file .env -f compose.aws.yaml ps",
+          "echo 'Deployment complete. Dashboard responded successfully.'"
+        ]
+      }
+      EOF
+
+      COMMAND_ID=$(aws ssm send-command \
+        --instance-ids "$INSTANCE_ID" \
+        --document-name "AWS-RunShellScript" \
+        --parameters file://deployment-commands.json \
+        --query "Command.CommandId" \
+        --output text)
+
+      echo "Deployment command submitted."
+
+      COMMAND_STATUS=""
+
+      for ATTEMPT in $(seq 1 240); do
+        COMMAND_STATUS=$(aws ssm get-command-invocation \
+          --command-id "$COMMAND_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "Status" \
+          --output text 2>/dev/null || true)
+
+        case "$COMMAND_STATUS" in
+          Success)
+            break
+            ;;
+          Failed|Cancelled|TimedOut)
+            aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}" \
+              --output json
+            exit 1
+            ;;
+        esac
+
+        sleep 5
+      done
+
+      if [ "$COMMAND_STATUS" != "Success" ]; then
+        echo "The deployment command did not complete in time."
+        exit 1
+      fi
+
+      aws ssm get-command-invocation \
+        --command-id "$COMMAND_ID" \
+        --instance-id "$INSTANCE_ID" \
+        --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}" \
+        --output json
+
+  resource_group: production
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+    - when: never

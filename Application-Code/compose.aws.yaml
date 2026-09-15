@@ -1,0 +1,51 @@
+name: website-uptime-monitoring
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: MySQL-Container
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u \"$${MYSQL_USER}\" --password=\"$${MYSQL_PASSWORD}\""
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  test-website:
+    image: "${CI_REGISTRY_IMAGE}/test_website:${IMAGE_TAG}"
+    container_name: Test-Site-Container
+    restart: unless-stopped
+    expose:
+      - "8001"
+
+  monitoring-app:
+    image: "${CI_REGISTRY_IMAGE}/monitoring_app:${IMAGE_TAG}"
+    container_name: Monitoring-Container
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      test-website:
+        condition: service_started
+    environment:
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+    ports:
+      - "8000:8000"
+
+volumes:
+  mysql_data:
+    name: mysql_data
